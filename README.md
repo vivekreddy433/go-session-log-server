@@ -24,7 +24,7 @@ Create a ".env" file in the project root and add:
 
 BATCH_SIZE=5
 BATCH_INTERVAL=10
-POST_ENDPOINT=https://webhook.site/335d0d0d-3883-4248-9926-820357e468a2
+POST_ENDPOINT=https://eorm4rn29wc3t5j.m.pipedream.net
 LOG_LEVEL=INFO
 LOG_FORMAT=JSON
 

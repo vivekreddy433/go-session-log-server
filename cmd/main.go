@@ -89,7 +89,7 @@ func main() {
     // and a predefined post endpoint for sending logs.
 	batchSize := GetEnvInt("BATCH_SIZE", 10)
 	batchInterval := GetEnvInt("BATCH_INTERVAL", 60)
-	postEndpoint := GetEnv("POST_ENDPOINT", "https://webhook.site/bfaf021f-150a-48dd-bf4e-d1110b5f5874")
+	postEndpoint := GetEnv("POST_ENDPOINT", "https://eorm4rn29wc3t5j.m.pipedream.net")
 
 	// initializes a structured logger with configurable format and level.
 	logger := ConfigureLogger()
