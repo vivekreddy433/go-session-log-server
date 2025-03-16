@@ -1,0 +1,53 @@
+{
+	"info": {
+		"_postman_id": "87aab569-754a-427d-841e-ba3e0963cbcc",
+		"name": "Webhook Receiver Local Tests",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "43116406"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/healthz",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"healthz"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Send Webhook Log",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"user_id\": 1,\n  \"total\": 2.50,\n  \"title\": \"Test Log\",\n  \"meta\": {\n    \"logins\": [{\"time\": \"2022-01-01T00:00:00Z\", \"ip\": \"192.168.1.1\"}],\n    \"phone_numbers\": {\"home\": \"555-1212\", \"mobile\": \"123-5555\"}\n  },\n  \"completed\": false\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/log",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"log"
+					]
+				}
+			},
+			"response": []
+		}
+	]
+}
