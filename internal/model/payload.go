@@ -2,6 +2,7 @@ package model
 
 import "time"
 
+// Payload represents the incoming data structure.
 type Payload struct {
 	UserID    int     `json:"user_id"`
 	Total     float64 `json:"total"`

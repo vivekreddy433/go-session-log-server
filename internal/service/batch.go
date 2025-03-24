@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"sync"
 	"time"
 
 	"webhook-receiver/internal/model"
@@ -13,81 +12,92 @@ import (
 	"go.uber.org/zap"
 )
 
-// Batcher handles log batching based on size and time interval.
+// Batcher handles log batching based on size and time interval using channels.
 type Batcher struct {
-	mu       sync.Mutex
-	payloads []model.Payload
-	size     int
-	interval time.Duration
-	endpoint string
-	ticker   *time.Ticker
-	stop     chan struct{}
-	logger   *zap.SugaredLogger
-	lastSent time.Time
+	payloadCh chan model.Payload
+	size      int
+	interval  time.Duration
+	endpoint  string
+	logger    *zap.SugaredLogger
+	done      chan struct{}
+	quit      chan struct{}
 }
 
-type ServiceBatcher interface{
+// ServiceBatcher defines methods to add payloads and stop the batch processor.
+type ServiceBatcher interface {
 	Add(payload model.Payload)
+	Stop()
 }
 
 // NewBatcher initializes the batch processor.
 func NewBatcher(size, interval int, endpoint string, logger *zap.SugaredLogger) *Batcher {
 	return &Batcher{
-		size:     size,
-		interval: time.Duration(interval) * time.Second,
-		endpoint: endpoint,
-		ticker:   time.NewTicker(time.Duration(interval) * time.Second),
-		stop:     make(chan struct{}),
-		logger:   logger,
-		lastSent: time.Now(),
+		payloadCh: make(chan model.Payload, size*2), // Buffered channel for non-blocking
+		size:      size,
+		interval:  time.Duration(interval) * time.Second,
+		endpoint:  endpoint,
+		logger:    logger,
+		done:      make(chan struct{}),
+		quit:      make(chan struct{}),
 	}
 }
 
-// Add stores a payload and checks if a batch should be sent.
+// Add pushes a payload to the channel.
 func (b *Batcher) Add(payload model.Payload) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	b.payloads = append(b.payloads, payload)
-
-	b.logger.Infof("New log added. Current batch size: %d", len(b.payloads))
-
-	// Send batch immediately if size limit is reached.
-	if len(b.payloads) >= b.size {
-		b.logger.Infof("Batch size limit (%d). reached. Sending batch...", len(b.payloads))
-		b.sendBatch()
+	select {
+	case b.payloadCh <- payload:
+		b.logger.Debug("Added payload to channel")
+	default:
+		b.logger.Warn("Payload channel is full, dropping payload")
 	}
 }
 
-// Run starts the timer-based batching.
+// Run starts the batch processing.
 func (b *Batcher) Run() {
+	ticker := time.NewTicker(b.interval)
+	defer ticker.Stop()
+
+	var batch []model.Payload
+
 	for {
 		select {
-		case <-b.ticker.C:
-			b.mu.Lock()
-			elapsed := time.Since(b.lastSent)
-			if len(b.payloads) > 0 && elapsed >= b.interval {
-				b.logger.Infof("Time-based trigger: %v seconds. Sending batch...", time.Since(b.lastSent).Seconds())
-				b.sendBatch()
-			} else {
-				b.logger.Debugf("Batch interval elapsed but no logs to send.")
+		case payload := <-b.payloadCh:
+			batch = append(batch, payload)
+			b.logger.Debug("Received payload from channel")
+			if len(batch) >= b.size {
+				b.sendBatch(batch)
+				batch = nil
 			}
-			b.mu.Unlock()
-		case <-b.stop:
-			b.logger.Info("Batch processor stopping.")
+		case <-ticker.C:
+			if len(batch) > 0 {
+				b.sendBatch(batch)
+				batch = nil
+			}
+		case <-b.done:
+			b.logger.Info("Received shutdown signal, flushing remaining payloads")
+			if len(batch) > 0 {
+				b.sendBatch(batch)
+			}
+			close(b.quit)
 			return
 		}
 	}
 }
 
-//  sendBatch processes and clears the batch after successful forwarding.
-func (b *Batcher) sendBatch() {
-	if len(b.payloads) == 0 {
-		b.logger.Info("Skipping batch send (empty batch).")
+// Stop batch processor gracefully.
+func (b *Batcher) Stop() {
+	close(b.done)
+	<-b.quit
+}
+
+// sendBatch sends a batch of payloads to the endpoint.
+func (b *Batcher) sendBatch(batch []model.Payload) {
+	if len(batch) == 0 {
+		b.logger.Warn("Attempted to send an empty batch")
 		return
 	}
 
-	data, err := json.Marshal(b.payloads)
+	data, err := json.Marshal(batch)
 	if err != nil {
 		b.logger.Errorf("Failed to serialize batch: %v", err)
 		return
@@ -98,13 +108,10 @@ func (b *Batcher) sendBatch() {
 	duration := time.Since(start)
 
 	if err != nil {
-		b.logger.Errorf("Batch sending failed: %v", err)
-		return
+		b.logger.Errorf("Failed to send batch after retries: %v", err)
+	} else {
+		b.logger.Infof("Successfully sent batch of %d records in %v", len(batch), duration)
 	}
-
-	b.logger.Infof("Successfully sent batch of %d records in %s", len(b.payloads), duration)
-	b.payloads = nil
-	b.lastSent = time.Now()
 }
 
 // postWithRetry attempts to send a batch, retrying if necessary.
@@ -114,19 +121,13 @@ func (b *Batcher) postWithRetry(data []byte, maxRetries int, delay time.Duration
 		if err == nil && resp.StatusCode < 300 {
 			return nil
 		}
+
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
 
-		b.logger.Warnf("Batch send attempt %d failed. Retrying in %s...", i+1, delay)
+		b.logger.Warnf("Batch send attempt %d failed, retrying in %v", i+1, delay)
 		time.Sleep(delay)
 	}
-
 	return errors.New("max retries exceeded")
-}
-
-// Stop gracefully shuts down batch processing.
-func (b *Batcher) Stop() {
-	b.ticker.Stop()
-	close(b.stop)
 }

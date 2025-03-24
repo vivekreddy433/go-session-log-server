@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -13,36 +12,25 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"webhook-receiver/config"
 	"webhook-receiver/internal/api"
 	"webhook-receiver/internal/service"
 )
 
-// GetEnv retrieves an environment variable or returns a default if not set
-func GetEnv(key, defaultVal string) string {
-	if val, exists := os.LookupEnv(key); exists {
-		return val
+// middleware to set logger at handler level
+func RequestLogger(logger *zap.SugaredLogger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		duration := time.Since(start)
+		logger.Infof("%s %s %d %s", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), duration)
 	}
-	return defaultVal
 }
 
-// GetEnvInt reads an integer from environment variables
-func GetEnvInt(key string, defaultVal int) int {
-	valStr := GetEnv(key, strconv.Itoa(defaultVal))
-	val, err := strconv.Atoi(valStr)
-	if err != nil {
-		return defaultVal
-	}
-	return val
-}
-
-// Configures the application logger based on environment settings
-func ConfigureLogger() *zap.SugaredLogger {
-	logLevel := GetEnv("LOG_LEVEL", "INFO")   // Default: INFO
-	logFormat := GetEnv("LOG_FORMAT", "JSON") // Default: JSON
-
-	// Set the log level
+// ConfigureLogger sets up the structured logger
+func ConfigureLogger(c config.Config) *zap.SugaredLogger {
 	var level zapcore.Level
-	switch logLevel {
+	switch c.LogLevel {
 	case "DEBUG":
 		level = zap.DebugLevel
 	case "INFO":
@@ -60,48 +48,31 @@ func ConfigureLogger() *zap.SugaredLogger {
 		LevelKey:   "level",
 		MessageKey: "message",
 		CallerKey:  "caller",
-		EncodeTime: zapcore.TimeEncoderOfLayout(time.RFC3339),
+		EncodeTime: zapcore.ISO8601TimeEncoder,
 	}
 
-	// Use JSON for structured logging or plain text for readability.
 	var encoder zapcore.Encoder
-	if logFormat == "TEXT" {
+	if c.LogFormat == "TEXT" {
 		encoder = zapcore.NewConsoleEncoder(encoderConfig)
 	} else {
 		encoder = zapcore.NewJSONEncoder(encoderConfig)
 	}
 
 	core := zapcore.NewCore(encoder, zapcore.Lock(os.Stdout), level)
-	logger := zap.New(core)
-
-	defer func() {
-		if err := logger.Sync(); err != nil {
-			log.Printf("Error syncing logger: %v", err)
-		}
-	}()
-
-	return logger.Sugar()
+	return zap.New(core).Sugar()
 }
 
 func main() {
-	// Load batch processing configuration from environment variables.
-    // If not set, it defaults to batch size of 10, interval of 60 seconds,
-    // and a predefined post endpoint for sending logs.
-	batchSize := GetEnvInt("BATCH_SIZE", 10)
-	batchInterval := GetEnvInt("BATCH_INTERVAL", 60)
-	postEndpoint := GetEnv("POST_ENDPOINT", "https://eorm4rn29wc3t5j.m.pipedream.net")
 
-	// initializes a structured logger with configurable format and level.
-	logger := ConfigureLogger()
-	logger.Infof("Starting server with batch size: %d, interval: %d seconds, post endpoint: %s", batchSize, batchInterval, postEndpoint)
+	config := config.New()
+	logger := ConfigureLogger(config)
+	logger.Infof("Starting server with batch size: %d, interval: %d seconds, post endpoint: %s", config.BatchSize, config.BatchInterval, config.ExternalPostEndpoint)
 
-	// Initialize batch processor
-	batcher := service.NewBatcher(batchSize, batchInterval, postEndpoint, logger)
+	batcher := service.NewBatcher(config.BatchSize, config.BatchInterval, config.ExternalPostEndpoint, logger)
 	go batcher.Run()
 
-	// Initialize API router
 	router := gin.New()
-	router.Use(gin.Recovery(), api.RequestLogger(logger))
+	router.Use(gin.Recovery(), RequestLogger(logger))
 
 	router.GET("/healthz", api.HealthCheck)
 	router.POST("/log", api.HandleLog(batcher))
@@ -111,7 +82,6 @@ func main() {
 		Handler: router,
 	}
 
-	// Handle graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -119,10 +89,14 @@ func main() {
 		<-quit
 		logger.Infof("Shutdown signal received")
 		batcher.Stop()
-		srv.Close()
+		if err := srv.Close(); err != nil {
+			logger.Errorf("Server shutdown error: %v", err)
+		}
 	}()
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal("Server error: ", err)
+		log.Fatalf("Server error: %v", err)
 	}
+
+	logger.Info("Server stopped gracefully")
 }
